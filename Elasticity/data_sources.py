@@ -38,6 +38,7 @@ def _require_data_files(data_dir: Path) -> dict[str, Path]:
 
 
 def source_signature(workspace_root: Path) -> dict[str, dict[str, float | int]]:
+    """Return source-file metadata used to invalidate cached derived data."""
     files = _require_data_files(workspace_root / "data")
     return {
         name: {"mtime": path.stat().st_mtime, "size": path.stat().st_size}
@@ -66,12 +67,14 @@ def _read_categories(categories_path: Path) -> pd.DataFrame:
 
 
 def _normalize_numeric_series(series: pd.Series) -> pd.Series:
+    """Parse numeric values, supporting comma decimal separators."""
     if is_numeric_dtype(series):
         return pd.to_numeric(series, errors="coerce")
     return pd.to_numeric(series.astype(str).str.replace(",", ".", regex=False), errors="coerce")
 
 
 def _normalize_itemcode(series: pd.Series) -> pd.Series:
+    """Convert item codes to nullable integers; invalid codes become <NA>."""
     # to_numeric(..., errors="coerce") marks invalid codes as NaN; Int64 keeps them as <NA>.
     return pd.to_numeric(series, errors="coerce").astype("Int64")
 
@@ -82,6 +85,7 @@ def iter_elasticity_source_chunks(
     chunksize: int,
     usecols: list[str] | None = None,
 ) -> Iterator[pd.DataFrame]:
+    """Yield merged/normalized chunks built from Order_Details, Orders, and Categories files."""
     data_dir = workspace_root / "data"
     files = _require_data_files(data_dir)
 
@@ -124,6 +128,7 @@ def load_elasticity_source_data(
     *,
     usecols: list[str] | None = None,
 ) -> pd.DataFrame:
+    """Load full elasticity source data by concatenating normalized chunks."""
     chunks = iter_elasticity_source_chunks(workspace_root, chunksize=DEFAULT_CHUNKSIZE, usecols=usecols)
     first_chunk = next(chunks, None)
     if first_chunk is None:
