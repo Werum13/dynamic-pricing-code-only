@@ -29,10 +29,10 @@ from DemandModel import demand_model
 from PriceOptimizer import price_optimizer
 from byer import init_warehouse, update_warehouse_day
 from Baseline import compare_baselines, SimResult, MLOptimizerBaseline
+from data_sources import load_elasticity_source_data
 
 # ─── Пути к данным ──────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
-DATA_PATH = BASE_DIR / "data" / "full_data.csv"
 COST_PATH = BASE_DIR / "data" / "cost.csv"
 
 # ─── Колонки, исключаемые из признаков ──────────────────────────────────────
@@ -61,7 +61,10 @@ SIGNAL_DIAGNOSTIC_COLS = [
 @st.cache_data(ttl=3600)
 def load_raw_data():
     """Загружает и объединяет данные + cost. Кэшируется на 1 час."""
-    data = pd.read_csv(DATA_PATH)
+    data = load_elasticity_source_data(
+        BASE_DIR,
+        usecols=["ITEMCODE", "DATE_", "UNITPRICE", "TOTALPRICE", "AMOUNT", "CATEGORY1", "CATEGORY2"],
+    )
     cost = pd.read_csv(COST_PATH)
     merged = pd.merge(data, cost[["ITEMCODE", "cost"]], how="left", on="ITEMCODE")
     merged["DATE_"] = pd.to_datetime(merged["DATE_"])

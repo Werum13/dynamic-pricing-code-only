@@ -4,7 +4,8 @@ compute_elasticity.py
 Считает ценовую эластичность для каждого ITEMCODE в одной точке цены.
 
 Этапы:
-    1. Загружаем full_data.csv (чанками, только нужные колонки) + cost.csv
+    1. Загружаем Order_Details.csv + Orders.csv + Categories_ENG.csv
+       (чанками, только нужные колонки) + cost.csv
     2. Для каждого ITEMCODE:
              a. DataPreprocessor — приведение типов, UNITPRICE, удаление выбросов
              b. ETL (etl_with_demand_target) — бинирование цен, rolling-фичи, time-фичи
@@ -40,6 +41,7 @@ sys.path.insert(0, str(MODULE_DIR))
 from DataPreprocessor import preprocessor         # noqa: E402
 from ETL import etl_with_demand_target            # noqa: E402
 from DemandModel import demand_model              # noqa: E402
+from data_sources import iter_elasticity_source_chunks, source_signature  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Константы
@@ -130,13 +132,12 @@ def _save_raw_manifest(manifest: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def prepare_item_files():
-    path_data = WORKSPACE_ROOT / "data" / "full_data.csv"
     path_cost = WORKSPACE_ROOT / "data" / "cost.csv"
 
     manifest = _load_raw_manifest()
-    source_mtime = path_data.stat().st_mtime
+    current_signature = source_signature(WORKSPACE_ROOT)
 
-    if manifest.get("source_mtime") == source_mtime and RAW_DIR.exists():
+    if manifest.get("source_signature") == current_signature and RAW_DIR.exists():
         item_files = {
             int(itemcode): Path(path)
             for itemcode, path in manifest.get("item_files", {}).items()
@@ -150,11 +151,18 @@ def prepare_item_files():
         shutil.rmtree(RAW_DIR)
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("Читаем full_data.csv чанками и сохраняем по ITEMCODE...")
+    print("Читаем Order_Details.csv + Orders.csv + Categories_ENG.csv чанками и сохраняем по ITEMCODE...")
     item_files = {}
     total = 0
 
-    for chunk in pd.read_csv(path_data, usecols=NEEDED_COLS, chunksize=CHUNK_SIZE):
+    for chunk in iter_elasticity_source_chunks(WORKSPACE_ROOT, chunksize=CHUNK_SIZE, usecols=NEEDED_COLS):
+        chunk = chunk.dropna(subset=["ITEMCODE"])
+        chunk["ITEMCODE"] = pd.to_numeric(chunk["ITEMCODE"], errors="coerce")
+        chunk = chunk[chunk["ITEMCODE"].notna()].copy()
+        if chunk.empty:
+            continue
+        chunk["ITEMCODE"] = chunk["ITEMCODE"].astype(int)
+
         total += len(chunk)
         itemcodes = np.unique(chunk["ITEMCODE"].to_numpy())
         code_values = chunk["ITEMCODE"].to_numpy()
@@ -169,7 +177,7 @@ def prepare_item_files():
 
     _save_raw_manifest(
         {
-            "source_mtime": source_mtime,
+            "source_signature": current_signature,
             "item_files": {str(k): v for k, v in item_files.items()},
         }
     )
@@ -186,6 +194,11 @@ def process_item(itemcode, item_path, cost_map, cache):
     # ── Preprocessor ─────────────────────────────────────────────────────────
     try:
         df_item = pd.read_csv(item_path)
+        df_item["AMOUNT"] = pd.to_numeric(
+            df_item["AMOUNT"].astype(str).str.replace(",", ".", regex=False),
+            errors="coerce",
+        )
+        df_item = df_item[df_item["AMOUNT"].notna()].copy()
         df_item["cost"] = df_item["ITEMCODE"].map(cost_map)
         df_pre = preprocessor(df_item.copy())
     except Exception as e:
