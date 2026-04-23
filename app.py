@@ -27,7 +27,7 @@ from DataPreprocessor import preprocessor
 from ETL import etl_with_demand_target
 from DemandModel import demand_model
 from PriceOptimizer import price_optimizer
-from byer import init_warehouse, update_warehouse_day
+from warehouse.byer import init_warehouse, update_warehouse_day
 from Baseline import compare_baselines, SimResult, MLOptimizerBaseline
 
 # ─── Пути к данным ──────────────────────────────────────────────────────────
