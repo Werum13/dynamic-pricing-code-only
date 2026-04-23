@@ -18,6 +18,7 @@ from PriceOptimizer import price_optimizer
 from Warehouse.byer import init_warehouse, update_warehouse_day
 from Evaluation import ElasticityEvaluator
 from Baseline import compare_baselines
+from data_sources import load_elasticity_source_data
 
 warnings.filterwarnings("ignore")
 
@@ -207,7 +208,6 @@ class Pipeline:
         self.OUTPUT_DIR = self.WORKSPACE_ROOT / "output" / "elasticity"
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         self.BASE_DIR = self.OUTPUT_DIR
-        self._path_data = self.WORKSPACE_ROOT / "data" / "full_data.csv"
         self._path_cost = self.WORKSPACE_ROOT / "data" / "cost.csv"
         self.history_pred = pd.DataFrame(
             columns=["DATE_", "ITEMCODE", "unitprice", "gmv",
@@ -220,11 +220,13 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _read_data(self) -> None:
-        for p in (self._path_data, self._path_cost):
-            if not p.exists():
-                raise FileNotFoundError(f"File not found: {p.resolve()}")
+        if not self._path_cost.exists():
+            raise FileNotFoundError(f"File not found: {self._path_cost.resolve()}")
 
-        data = pd.read_csv(self._path_data)
+        data = load_elasticity_source_data(
+            self.WORKSPACE_ROOT,
+            usecols=["ITEMCODE", "DATE_", "UNITPRICE", "TOTALPRICE", "AMOUNT", "CATEGORY1", "CATEGORY2"],
+        )
         cost = pd.read_csv(self._path_cost)
         self.data = pd.merge(data, cost[["ITEMCODE", "cost"]], how="left", on="ITEMCODE")
         print(f"Data loaded: {self.data.shape}, columns: {list(self.data.columns)}")
