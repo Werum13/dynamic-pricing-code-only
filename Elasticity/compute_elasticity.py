@@ -156,16 +156,13 @@ def prepare_item_files():
     total = 0
 
     for chunk in iter_elasticity_source_chunks(WORKSPACE_ROOT, chunksize=CHUNK_SIZE, usecols=NEEDED_COLS):
-        chunk = chunk.dropna(subset=["ITEMCODE"])
-        chunk["ITEMCODE"] = pd.to_numeric(chunk["ITEMCODE"], errors="coerce")
         chunk = chunk[chunk["ITEMCODE"].notna()].copy()
         if chunk.empty:
             continue
-        chunk["ITEMCODE"] = chunk["ITEMCODE"].astype(int)
 
         total += len(chunk)
-        itemcodes = np.unique(chunk["ITEMCODE"].to_numpy())
-        code_values = chunk["ITEMCODE"].to_numpy()
+        code_values = chunk["ITEMCODE"].astype("int64").to_numpy()
+        itemcodes = np.unique(code_values)
         for itemcode in itemcodes:
             grp = chunk.loc[code_values == itemcode]
             item_path = RAW_DIR / f"item_{itemcode}.csv"
@@ -194,11 +191,6 @@ def process_item(itemcode, item_path, cost_map, cache):
     # ── Preprocessor ─────────────────────────────────────────────────────────
     try:
         df_item = pd.read_csv(item_path)
-        df_item["AMOUNT"] = pd.to_numeric(
-            df_item["AMOUNT"].astype(str).str.replace(",", ".", regex=False),
-            errors="coerce",
-        )
-        df_item = df_item[df_item["AMOUNT"].notna()].copy()
         df_item["cost"] = df_item["ITEMCODE"].map(cost_map)
         df_pre = preprocessor(df_item.copy())
     except Exception as e:
