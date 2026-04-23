@@ -1,4 +1,5 @@
 import json
+import sys
 import pickle
 import warnings
 from pathlib import Path
@@ -6,11 +7,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from DataPreprocessor import preprocessor
 from ETL import etl_with_demand_target
 from DemandModel import demand_model
 from PriceOptimizer import price_optimizer
-from byer import init_warehouse, update_warehouse_day
+from Warehouse.byer import init_warehouse, update_warehouse_day
 from Evaluation import ElasticityEvaluator
 from Baseline import compare_baselines
 
