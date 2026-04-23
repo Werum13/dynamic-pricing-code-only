@@ -1,0 +1,51 @@
+{
+  "paths": {
+    "full_data": "../data/full_data.csv",
+    "cost": "../data/cost.csv",
+    "elasticity": "../data/elasticity.csv",
+    "output_dir": "../output/optimization"
+  },
+  "dataset": {
+    "chunk_size": 200000,
+    "max_rows": null,
+    "max_items": 300,
+    "history_days": 365,
+    "min_item_amount": 10.0,
+    "min_history_days": 35,
+    "kvi_top_pct": 0.15
+  },
+  "scenarios": {
+    "candidate_deltas": [-0.09, -0.05, -0.02, 0.0, 0.02, 0.05, 0.09],
+    "min_margin_pct": 0.05,
+    "max_abs_change_pct": 0.1,
+    "kvi_max_abs_change_pct": 0.03,
+    "anchor_max_abs_change_pct": 0.02
+  },
+  "model": {
+    "name": "lightgbm-regressor",
+    "random_state": 42,
+    "params": {
+      "n_estimators": 250,
+      "learning_rate": 0.05,
+      "num_leaves": 31,
+      "subsample": 0.9,
+      "colsample_bytree": 0.9,
+      "min_child_samples": 50
+    },
+    "utility_weights": {
+      "margin": 0.55,
+      "revenue": 0.25,
+      "volume": 0.2,
+      "penetration_penalty": 0.2,
+      "basket_penalty": 0.15,
+      "kvi_penalty": 1.1,
+      "cannibal_penalty": 0.25
+    }
+  },
+  "evaluation": {
+    "train_days": 180,
+    "test_days": 28,
+    "step_days": 28,
+    "min_train_rows": 500
+  }
+}
