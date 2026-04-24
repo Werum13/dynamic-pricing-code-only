@@ -64,7 +64,7 @@ def digit_optimize_family_prices(
             "cannibal"
         )
 
-        floor_price = max(cost * (1.0 + min_margin_pct), cost, ref_price * min_price_mult)
+        floor_price = max(cost * (1.0 + min_margin_pct), ref_price * min_price_mult)
         cap_price = ref_price * (1.0 + kvi_delta_cap) if is_kvi else ref_price * max_price_mult
         if cap_price < floor_price:
             cap_price = floor_price
