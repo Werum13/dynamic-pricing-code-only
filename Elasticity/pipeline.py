@@ -202,8 +202,9 @@ def _make_future_row(day: pd.Timestamp, itemcode, df_hist: pd.DataFrame) -> pd.D
 
 class Pipeline:
 
-    def __init__(self):
+    def __init__(self, itemcode: int = 40760):
         self.data = None
+        self.itemcode = int(itemcode)
         self.WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
         self.OUTPUT_DIR = self.WORKSPACE_ROOT / "output" / "elasticity"
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -214,18 +215,27 @@ class Pipeline:
                      "margin", "quantity", "margin_percent"]
         )
         self.warehouse = None
-        self._read_data()
+        self._read_data(itemcode=self.itemcode)
         self._load_existing_results()
 
     # ------------------------------------------------------------------
 
-    def _read_data(self) -> None:
+    def _read_data(self, itemcode: int | None = None) -> None:
         if not self._path_cost.exists():
             raise FileNotFoundError(f"File not found: {self._path_cost.resolve()}")
+
+        if itemcode is not None:
+            print(
+                f"Loading source data for ITEMCODE={int(itemcode)} "
+                f"(first run may take a few minutes; then it is cached)..."
+            )
+        else:
+            print("Loading source data (first run may take a few minutes)...")
 
         data = load_elasticity_source_data(
             self.WORKSPACE_ROOT,
             usecols=["ITEMCODE", "DATE_", "UNITPRICE", "TOTALPRICE", "AMOUNT", "CATEGORY1", "CATEGORY2"],
+            itemcodes=[int(itemcode)] if itemcode is not None else None,
         )
         cost = pd.read_csv(self._path_cost)
         self.data = pd.merge(data, cost[["ITEMCODE", "cost"]], how="left", on="ITEMCODE")
@@ -258,7 +268,7 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def simulation(self) -> None:
-        itemcode = 107
+        itemcode = self.itemcode
 
         # Препроцессинг
         self.data = self.data[self.data["ITEMCODE"] == itemcode]
