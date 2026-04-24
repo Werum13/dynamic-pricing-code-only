@@ -87,7 +87,7 @@ def load_kvi_context() -> dict[str, Any]:
     return ctx
 
 
-def get_item_family(item_code: int, sub_map: dict[str, Any]) -> dict[str, Any]:
+def get_item_family(item_code: int, sub_map: dict[int, Any]) -> dict[str, Any]:
     entry = sub_map.get(item_code, {})
 
     substitutes = [int(x) for x in entry.get("substitutes", [])]
