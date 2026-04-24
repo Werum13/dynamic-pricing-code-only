@@ -5,6 +5,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+MIN_ELASTICITY = -8.0
+MAX_ELASTICITY = -0.01
+FLOAT_TOLERANCE = 1e-12
+
 
 def demand_power(price: float, q0: float, p0: float, elasticity: float) -> float:
     if price <= 0 or p0 <= 0 or q0 <= 0:
@@ -28,10 +32,7 @@ def digit_optimize_family_prices(
     rows: list[dict[str, Any]] = []
 
     deltas = params.get("DIGIT_PRICE_DELTAS", _default_deltas())
-    deltas = sorted(set(float(x) for x in deltas))
-    if 0.0 not in deltas:
-        deltas.append(0.0)
-        deltas = sorted(deltas)
+    deltas = sorted(set(float(x) for x in deltas) | {0.0})
 
     lambda_kvi = float(params.get("LAMBDA_KVI", 10.0))
     kvi_delta_cap = float(params.get("DELTA_KVI", 0.05))
@@ -49,7 +50,7 @@ def digit_optimize_family_prices(
         elasticity = float(info.get("elasticity", -1.2))
         if not np.isfinite(elasticity):
             elasticity = -1.2
-        elasticity = float(np.clip(elasticity, -8.0, -0.01))
+        elasticity = float(np.clip(elasticity, MIN_ELASTICITY, MAX_ELASTICITY))
 
         avg_qty = float(info.get("avg_qty", 1.0) or 1.0)
         avg_qty = max(avg_qty, 1e-6)
@@ -70,7 +71,7 @@ def digit_optimize_family_prices(
 
         best = None
         for dlt in deltas:
-            if is_kvi and abs(dlt) > kvi_delta_cap + 1e-12:
+            if is_kvi and abs(dlt) > kvi_delta_cap + FLOAT_TOLERANCE:
                 continue
 
             candidate_price = ref_price * (1.0 + dlt)
