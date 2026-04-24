@@ -272,9 +272,19 @@ def estimate_item_elasticity_for_day(
             }
         )
 
+    if not elasticity_by_price:
+        return {
+            "elasticity": None,
+            "baseprice": ref_price,
+            "avg_qty": max(fallback_qty, 0.0),
+            "n_obs": int(len(train_df)),
+            "method": "no_price_points",
+            "elasticity_by_price": [],
+        }
+
     primary_point = next((row for row in elasticity_by_price if abs(row["price"] - ref_price) < 1e-9), elasticity_by_price[0])
     eps = primary_point["elasticity"]
-    pred_qty = float(primary_point["predicted_qty"]) if primary_point["predicted_qty"] is not None else fallback_qty
+    pred_qty = float(primary_point["predicted_qty"])
     avg_qty = float(hist_daily.tail(window_days)["AMOUNT"].mean()) if len(hist_daily) > 0 else max(pred_qty, 0.0)
 
     if eps is not None and not np.isfinite(eps):
