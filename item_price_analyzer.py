@@ -31,7 +31,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from digit_optimization_module import digit_optimize_family_prices
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -352,12 +352,6 @@ def get_elasticity_for_family(
 # 4. ОПТИМИЗАЦИЯ ЦЕН ДЛЯ СЕМЬИ
 # ══════════════════════════════════════════════════════════════════════════════
 
-def demand_power(p: float, q0: float, p0: float, eps: float) -> float:
-    if p <= 0 or p0 <= 0 or q0 <= 0:
-        return 0.0
-    return q0 * (p / p0) ** eps
-
-
 def optimize_family_prices(
     family: dict,
     elast_map: dict,
@@ -366,123 +360,14 @@ def optimize_family_prices(
     kvi_set: set,
     params: dict,
 ) -> pd.DataFrame:
-    """
-    Совместная оптимизация цен для всей семьи.
-
-    Для семьи из одного товара задача сепарабельна и решается аналитически.
-    Для семьи с несколькими членами — численно (scipy.optimize.minimize).
-
-    Целевая функция:
-        max Σᵢ (pᵢ - cᵢ) · qᵢ⁰ · (pᵢ/pᵢ⁰)^εᵢ
-            - λ · Σᵢ∈KVI wᵢ · (pᵢ/pᵢ⁰ - 1)²
-    """
-    items = family["all_items"]
-    n = len(items)
-
-    # Собираем параметры по каждому товару
-    p0_arr   = np.array([elast_map[ic]["baseprice"]  for ic in items], dtype=float)
-    eps_arr  = np.array([elast_map[ic]["elasticity"] for ic in items], dtype=float)
-    q0_arr   = np.array([elast_map[ic]["avg_qty"]    for ic in items], dtype=float)
-    q0_arr   = np.where(q0_arr <= 0, 1.0, q0_arr)
-
-    cost_arr = np.array([ctx["cost_map"].get(ic, p0_arr[i] * 0.6)
-                         for i, ic in enumerate(items)], dtype=float)
-
-    is_kvi_arr = np.array([ic in kvi_set for ic in items], dtype=bool)
-
-    lam   = params.get("LAMBDA_KVI", 10.0)
-    delta = params.get("DELTA_KVI",   0.05)
-    min_m = params.get("MIN_MARGIN_PCT", 0.05)
-    max_m = params.get("MAX_PRICE_MULT", 2.5)
-
-    # Границы
-    bounds = []
-    for i, ic in enumerate(items):
-        p_lo = max(cost_arr[i] * (1 + min_m), p0_arr[i] * 0.5)
-        p_hi = p0_arr[i] * (1 + delta) if is_kvi_arr[i] else p0_arr[i] * max_m
-        p_hi = max(p_hi, p_lo * 1.01)
-        bounds.append((p_lo, p_hi))
-
-    # Начальная точка: Рамсей или базовая цена
-    p_init = []
-    for i in range(n):
-        eps = eps_arr[i]
-        cost = cost_arr[i]
-        if abs(eps) > 1.0:
-            p_ram = (eps / (eps + 1)) * cost
-            p_ram = np.clip(p_ram, bounds[i][0], bounds[i][1])
-        else:
-            p_ram = p0_arr[i]
-        p_init.append(p_ram)
-    p_init = np.array(p_init)
-
-    def objective(p_vec):
-        total = 0.0
-        for i in range(n):
-            q = demand_power(p_vec[i], q0_arr[i], p0_arr[i], eps_arr[i])
-            total -= (p_vec[i] - cost_arr[i]) * q
-            if is_kvi_arr[i]:
-                total += lam * ((p_vec[i] / p0_arr[i] - 1) ** 2)
-        return total
-
-    if n == 1:
-        # Аналитически через minimize_scalar
-        from scipy.optimize import minimize_scalar
-        res = minimize_scalar(
-            lambda p: objective(np.array([p])),
-            bounds=bounds[0],
-            method="bounded",
-        )
-        p_opt = np.array([np.clip(res.x, bounds[0][0], bounds[0][1])])
-    else:
-        res = minimize(
-            objective,
-            x0=p_init,
-            method="L-BFGS-B",
-            bounds=bounds,
-            options={"ftol": 1e-9, "maxiter": 1000},
-        )
-        p_opt = np.clip(res.x, [b[0] for b in bounds], [b[1] for b in bounds])
-
-    # Формируем результирующий DataFrame
-    rows = []
-    for i, ic in enumerate(items):
-        p0  = p0_arr[i]
-        p   = p_opt[i]
-        eps = eps_arr[i]
-        q0  = q0_arr[i]
-        c   = cost_arr[i]
-
-        q_cur = demand_power(p0, q0, p0, eps)
-        q_new = demand_power(p,  q0, p0, eps)
-        m_cur = (p0 - c) * q_cur
-        m_new = (p  - c) * q_new
-
-        role = "target" if ic == family["target"] else (
-            "substitute" if ic in family["substitutes"] else
-            "complement" if ic in family["complements"] else
-            "cannibal"
-        )
-
-        rows.append({
-            "ITEMCODE":          ic,
-            "role":              role,
-            "is_kvi":            ic in kvi_set,
-            "current_price":     round(p0, 4),
-            "recommended_price": round(p,  4),
-            "price_change_pct":  round((p - p0) / p0 * 100, 2) if p0 > 0 else None,
-            "elasticity":        round(eps, 4),
-            "elasticity_method": elast_map[ic]["method"],
-            "n_obs_window":      elast_map[ic]["n_obs"],
-            "cost":              round(c, 4),
-            "margin_current":    round(m_cur, 2),
-            "margin_new":        round(m_new, 2),
-            "margin_delta":      round(m_new - m_cur, 2),
-            "demand_current":    round(q_cur, 2),
-            "demand_new":        round(q_new, 2),
-        })
-
-    return pd.DataFrame(rows)
+    return digit_optimize_family_prices(
+        family=family,
+        elast_map=elast_map,
+        ctx=ctx,
+        hypothetical_prices=hypothetical_prices,
+        kvi_set=kvi_set,
+        params=params,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
