@@ -54,7 +54,9 @@ def load_kvi_context() -> dict[str, Any]:
 
     if SUBSTITUTE_MAP_PATH.exists():
         with open(SUBSTITUTE_MAP_PATH, encoding="utf-8") as f:
-            ctx["sub_map"] = json.load(f)
+            raw = json.load(f)
+        # Normalize keys once so consumers can always use int keys.
+        ctx["sub_map"] = {int(k): v for k, v in raw.items()}
     else:
         ctx["sub_map"] = {}
 
@@ -86,8 +88,7 @@ def load_kvi_context() -> dict[str, Any]:
 
 
 def get_item_family(item_code: int, sub_map: dict[str, Any]) -> dict[str, Any]:
-    key = str(item_code)
-    entry = sub_map.get(key, sub_map.get(item_code, {}))
+    entry = sub_map.get(item_code, {})
 
     substitutes = [int(x) for x in entry.get("substitutes", [])]
     complements = [int(x) for x in entry.get("complements", [])]

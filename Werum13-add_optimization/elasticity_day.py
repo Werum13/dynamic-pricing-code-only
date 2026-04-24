@@ -83,7 +83,13 @@ def estimate_item_elasticity_for_day(
 
     df_pre = preprocessor(df_item.copy())
     if len(df_pre) < MIN_TOTAL_ROWS:
-        return {"elasticity": None, "baseprice": price or 0.0, "avg_qty": float(df_pre["AMOUNT"].mean()) if len(df_pre) else 0.0, "n_obs": int(len(df_pre)), "method": "insufficient_preprocessed_data"}
+        return {
+            "elasticity": None,
+            "baseprice": price or 0.0,
+            "avg_qty": float(df_pre["AMOUNT"].mean()) if len(df_pre) else 0.0,
+            "n_obs": int(len(df_pre)),
+            "method": "insufficient_preprocessed_data",
+        }
 
     hist = df_pre[df_pre["DATE_"] < day].copy()
     if hist.empty:

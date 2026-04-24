@@ -5,6 +5,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+# Guardrails for demand-power stability:
+# - below MIN_ELASTICITY curve becomes numerically explosive;
+# - above MAX_ELASTICITY (near zero/positive) would violate the intended downward demand slope.
 MIN_ELASTICITY = -8.0
 MAX_ELASTICITY = -0.01
 FLOAT_TOLERANCE = 1e-12
