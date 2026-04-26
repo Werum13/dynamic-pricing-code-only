@@ -7,9 +7,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ELASTICITY_DIR = PROJECT_ROOT / "Elasticity"
-for p in [PROJECT_ROOT, ELASTICITY_DIR]:
+MODULE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MODULE_DIR.parent
+for p in [MODULE_DIR, PROJECT_ROOT]:
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -56,6 +56,7 @@ def _load_item_source(item_code: int) -> pd.DataFrame:
     df = load_elasticity_source_data(
         PROJECT_ROOT,
         usecols=["ITEMCODE", "DATE_", "UNITPRICE", "TOTALPRICE", "AMOUNT", "CATEGORY1", "CATEGORY2"],
+        itemcodes=[int(item_code)],
     )
     df["DATE_"] = pd.to_datetime(df["DATE_"])
     df = df[df["ITEMCODE"].astype("int64") == int(item_code)].copy()

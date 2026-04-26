@@ -8,17 +8,28 @@ import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+ELASTICITY_DIR = Path(__file__).resolve().parent
+for p in [PROJECT_ROOT, ELASTICITY_DIR]:
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
-from DataPreprocessor import preprocessor
-from ETL import etl_with_demand_target
-from DemandModel import demand_model
-from PriceOptimizer import price_optimizer
+try:
+    from Elasticity.DataPreprocessor import preprocessor
+    from Elasticity.ETL import etl_with_demand_target
+    from Elasticity.DemandModel import demand_model
+    from Elasticity.Evaluation import ElasticityEvaluator
+    from Elasticity.Baseline import compare_baselines
+    from Elasticity.data_sources import load_elasticity_source_data
+except ImportError:
+    from DataPreprocessor import preprocessor
+    from ETL import etl_with_demand_target
+    from DemandModel import demand_model
+    from Evaluation import ElasticityEvaluator
+    from Baseline import compare_baselines
+    from data_sources import load_elasticity_source_data
+
+from Elasticity.item_price_analyzer import analyze_item as analyze_item_policy
 from Warehouse.byer import init_warehouse, update_warehouse_day
-from Evaluation import ElasticityEvaluator
-from Baseline import compare_baselines
-from data_sources import load_elasticity_source_data
 
 warnings.filterwarnings("ignore")
 
@@ -145,7 +156,7 @@ def _run_baselines(
     itemcode: int,
     model_demand=None,
     df_for_elasticity=None,
-) -> None:
+) -> pd.DataFrame:
     demand_fn = None
     if model_demand is not None and df_for_elasticity is not None:
         def demand_fn(day, price, cost):
@@ -177,8 +188,10 @@ def _run_baselines(
         )
         print(table.to_string())
         table.to_csv(pipeline.BASE_DIR / f"baseline_comparison_{itemcode}.csv")
+        return table
     except Exception as e:
         print(f"Baseline comparison failed: {e}")
+        return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +215,7 @@ def _make_future_row(day: pd.Timestamp, itemcode, df_hist: pd.DataFrame) -> pd.D
 
 class Pipeline:
 
-    def __init__(self, itemcode: int = 40760):
+    def __init__(self, itemcode: int = 17662):
         self.data = None
         self.itemcode = int(itemcode)
         self.WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
@@ -267,7 +280,13 @@ class Pipeline:
 
     # ------------------------------------------------------------------
 
-    def simulation(self) -> None:
+    def simulation(
+        self,
+        first_day: pd.Timestamp | None = None,
+        n_days: int = 10,
+        window_days: int = 30,
+        run_evaluation: bool = True,
+    ) -> dict[str, object]:
         itemcode = self.itemcode
 
         # Препроцессинг
@@ -275,13 +294,17 @@ class Pipeline:
         self.data = preprocessor(self.data)
         print(f"Preprocessed: {self.data.shape}")
 
-        first_day = self.data["DATE_"].max() - pd.Timedelta("180D")
-        last_day  = first_day + pd.Timedelta("10D")
+        if first_day is None:
+            first_day = self.data["DATE_"].max() - pd.Timedelta("180D")
+        else:
+            first_day = pd.Timestamp(first_day).normalize()
+        n_days = max(int(n_days), 1)
+        last_day = first_day + pd.Timedelta(days=n_days)
         print(f"Simulation period: {first_day.date()} -> {last_day.date()}")
 
         # Оценка модели на исторических данных до симуляции
         df_hist_eval = self.data[self.data["DATE_"] < first_day].copy()
-        if len(df_hist_eval) >= 30:
+        if run_evaluation and len(df_hist_eval) >= 30:
             # Добавляем строку-заглушку, чтобы rolling-окно не обрезало хвост
             dummy = df_hist_eval.iloc[[-1]].copy()
             dummy["DATE_"] = df_hist_eval["DATE_"].max() + pd.Timedelta("8D")
@@ -304,15 +327,87 @@ class Pipeline:
             store_csv_path=warehouse_store_csv,
         )
 
-        model_cache  = _load_model_cache(self.BASE_DIR)
-        model_demand = None
-
         self.history_pred = pd.DataFrame(
             columns=["DATE_", "ITEMCODE", "unitprice", "gmv",
                      "margin", "quantity", "margin_percent"]
         )
 
+        policy_params = {
+            "LAMBDA_KVI": 10.0,
+            "DELTA_KVI": 0.2,
+            "MIN_MARGIN_PCT": 0.05,
+            "MAX_PRICE_MULT": 2.5,   # оптимизатор может поднять цену до 2.5× от базовой
+            "MIN_PRICE_MULT": 0.5,
+            # ----------------------------------------------------------------
+            # DIGIT_PRICE_DELTAS — дискретная сетка заменена на непрерывную
+            # оптимизацию через scipy.minimize_scalar (см. analyze_item_policy).
+            # Оставляем для совместимости: если digit_optimize_family_prices
+            # всё ещё использует сетку — расширили до [-0.5, +1.0] с мелким шагом.
+            # Корень бага: при |ε| < 1 маржа монотонно растёт → всегда выбирался
+            # правый край (+20%). Теперь правый край = +100% (MAX_PRICE_MULT).
+            # ----------------------------------------------------------------
+            "DIGIT_PRICE_DELTAS": [
+                -0.30, -0.20, -0.15, -0.10, -0.07, -0.05, -0.03,
+                0.0,
+                0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.50, 0.75, 1.00,
+            ],
+        }
+        hp_path = None
+        for candidate in [self.WORKSPACE_ROOT / "hyperparameters.json", self.WORKSPACE_ROOT / "KVI" / "hyperparameters.json"]:
+            if candidate.exists():
+                hp_path = candidate
+                break
+        if hp_path is not None:
+            with open(hp_path, "r", encoding="utf-8") as f:
+                hp = json.load(f)
+                policy_params.update(hp.get("agent6", hp))
+
         day = first_day
+
+        # ------------------------------------------------------------------
+        # Баг 5 фикс: строим ETL-таблицу один раз для всех исторических данных,
+        # чтобы в цикле можно было брать правильную строку признаков
+        # для конкретного дня (dayofweek, month, rolling-лаги и т.д.).
+        # Без этого template всегда = tail(1) → все дни одинаковы.
+        # ------------------------------------------------------------------
+        df_hist_all = self.data[self.data["DATE_"] < first_day].copy()
+        try:
+            df_etl_all = etl_with_demand_target(df_hist_all)
+        except Exception as _etl_e:
+            print(f"ETL pre-build failed: {_etl_e}")
+            df_etl_all = pd.DataFrame()
+
+        _TARGET_COLS = [
+            "DATE_", "CATEGORY1", "CATEGORY2",
+            "GMV_1D", "GMV_7D", "GMV_15D", "GMV_30D",
+            "AMOUNT_0D_target", "AMOUNT_1D_target", "AMOUNT_7D_target",
+            "AMOUNT_15D_target", "AMOUNT_30D_target",
+            "AMOUNT_1D", "AMOUNT_7D", "AMOUNT_15D", "AMOUNT_30D",
+        ]
+
+        def _get_day_template(day: pd.Timestamp) -> pd.DataFrame | None:
+            """
+            Возвращает строку признаков из df_etl_all, соответствующую
+            конкретному дню симуляции. Несёт правильные dayofweek, month,
+            rolling-лаги — устраняет баг плоской оптимизации.
+            """
+            if df_etl_all.empty:
+                return None
+            day_norm = pd.Timestamp(day).normalize()
+            # Ищем строку с признаками ≤ day (ближайшая предшествующая)
+            candidates = df_etl_all[df_etl_all["DATE_"] <= day_norm]
+            if candidates.empty:
+                return None
+            row = candidates.sort_values("DATE_").tail(1).copy()
+            # Синтетически обновляем дату и временны́е признаки для нужного дня
+            row["DATE_"] = day_norm
+            row["dayofweek"] = day_norm.dayofweek
+            row["month"] = day_norm.month
+            row["day"] = day_norm.day
+            row["weekofyear"] = int(day_norm.isocalendar()[1])
+            row["is_weekend"] = int(day_norm.dayofweek >= 5)
+            return row.drop(columns=[c for c in _TARGET_COLS if c in row.columns and c != "DATE_"],
+                            errors="ignore")
 
         # ------------------------------------------------------------------
         # Основной цикл
@@ -331,79 +426,59 @@ class Pipeline:
             )
             print(f"Warehouse: rest={wh['rest']}, available={wh['available']}, pred={wh['pred']:.2f}")
 
-            # Исторические данные + строка для сегодня
-            df = self.data[self.data["DATE_"] < day].copy()
-            future_row = _make_future_row(day, itemcode, df)
-            df = pd.concat([df, future_row], ignore_index=True).sort_values("DATE_").reset_index(drop=True)
-
-            df = etl_with_demand_target(df)
-            print(f"After ETL: {df.shape}")
-
-            # Обучающая выборка: без последнего дня (next-day target смотрит вперёд)
-            cutoff = day - pd.Timedelta(days=1)
-            train_full = df[(df["DATE_"] < day) & (df["DATE_"] < cutoff)].copy()
-
-            target   = train_full["AMOUNT_0D_target"].copy()
-            train_df = train_full.drop(columns=self._TARGET_AND_FUTURE_COLS, errors="ignore")
-
-            valid = train_df.notna().all(axis=1) & target.notna()
-            train_df = train_df[valid]
-            target   = target[valid]
-
-            print(f"Training rows: {len(train_df)} (data up to {cutoff.date()})")
-
-            model_demand, model_cache = _get_model(
-                base_dir=self.BASE_DIR,
-                itemcode=itemcode,
-                day=day,
-                train_df=train_df,
-                target=target,
-                cache=model_cache,
-            )
-
-            # Строка-шаблон для сегодняшнего дня (одна строка признаков)
-            today_template = (
-                df[df["DATE_"] == day]
-                .drop(columns=self._TARGET_AND_FUTURE_COLS, errors="ignore")
-                .copy()
-            )
-            today_template["Id"] = 0
-
-            item_cost      = float(self.data["cost"].iloc[0]) if "cost" in self.data.columns else 0.0
-            hist_prices = self.data[
+            same_day_prices = self.data[
                 (self.data["DATE_"].dt.normalize() == pd.Timestamp(day).normalize()) &
                 (self.data["AMOUNT"] > 0)
             ]["UNITPRICE"]
-            item_baseprice = (
-                float(hist_prices.median()) if len(hist_prices) > 0
-                else float(today_template["UNITPRICE"].iloc[0]) if "UNITPRICE" in today_template.columns
-                else None
-            )
+            if len(same_day_prices) > 0:
+                item_baseprice = float(same_day_prices.median())
+            else:
+                past_prices = self.data[
+                    (self.data["DATE_"] < day) &
+                    (self.data["AMOUNT"] > 0)
+                ]["UNITPRICE"]
+                item_baseprice = float(past_prices.tail(30).median()) if len(past_prices) > 0 else float(self.data["UNITPRICE"].median())
 
-            # Оптимизация цены
-            d = price_optimizer(
-                demand_model=model_demand,
-                row_features=today_template,
-                stock=float(wh["available"]),
-                cost=item_cost,
-                base_price=item_baseprice,
-                objective="profit",
-                n_grid=300,
-            )
+            item_cost = float(self.data["cost"].iloc[0]) if "cost" in self.data.columns else 0.0
+            if not np.isfinite(item_baseprice) or item_baseprice <= 0:
+                item_baseprice = max(item_cost * 1.3, 1.0)
 
-            optimal_price = round(float(d["unitprice"]), 2)
-            realized_qty  = int(round(float(d["quantity"])))
-            realized_gmv  = round(optimal_price * realized_qty, 2)
+            rec_df = analyze_item_policy(
+                item_code=itemcode,
+                date=str(pd.Timestamp(day).date()),
+                price=float(item_baseprice),
+                window_days=int(window_days),
+                params=policy_params,
+                output_path=None,
+            )
+            if rec_df.empty:
+                raise RuntimeError(f"Policy block returned empty recommendation for ITEMCODE={itemcode} on {day.date()}")
+
+            target_rows = rec_df[rec_df["ITEMCODE"].astype("int64") == int(itemcode)]
+            rec_row = target_rows.iloc[0] if len(target_rows) > 0 else rec_df.iloc[0]
+
+            optimal_price = round(float(rec_row["recommended_price"]), 2)
+            expected_qty = max(float(rec_row.get("demand_new", 0.0)), 0.0)
+            realized_qty = int(round(min(expected_qty, float(wh["available"]))))
+            realized_qty = max(realized_qty, 0)
+
+            realized_gmv = round(optimal_price * realized_qty, 2)
             realized_margin = round((optimal_price - item_cost) * realized_qty, 2)
             realized_margin_pct = round((optimal_price - item_cost) / max(optimal_price, 1e-8) * 100, 2)
+            elasticity_val = float(rec_row.get("elasticity", np.nan))
+            elasticity_method = str(rec_row.get("elasticity_method", "unknown"))
+            n_obs_window = int(rec_row.get("n_obs_window", 0))
+            stock_binding = expected_qty > float(wh["available"])
 
             print(
                 f"Optimal price: {optimal_price:.2f} | "
-                f"Q: {realized_qty} | "
+                f"Q_expected: {expected_qty:.2f} | "
+                f"Q_realized: {realized_qty} | "
                 f"GMV: {realized_gmv:.2f} | "
                 f"Margin: {realized_margin:.2f} | "
-                f"Elasticity: {d['elasticity']:.3f} | "
-                f"Stock binding: {d['stock_binding']}"
+                f"Elasticity: {elasticity_val:.3f} ({elasticity_method}) | "
+                f"n_obs={n_obs_window} | "
+                f"Stock binding: {stock_binding}"
             )
 
             # Обновление склада по факту
@@ -426,7 +501,10 @@ class Pipeline:
                         "margin_percent": realized_margin_pct,
                         "cost":           item_cost,
                         "baseprice":      item_baseprice,
-                        "elasticity":     d["elasticity"],
+                        "elasticity":     elasticity_val,
+                        "elasticity_method": elasticity_method,
+                        "n_obs_window":   n_obs_window,
+                        "stock_binding":  stock_binding,
                     }]),
                 ],
                 ignore_index=True,
@@ -458,16 +536,15 @@ class Pipeline:
             (self.data["DATE_"] < last_day)
         ].copy()
 
-        try:
-            df_for_baseline = etl_with_demand_target(
-                self.data[self.data["DATE_"] < last_day].copy()
-            )
-            _run_baselines(self, df_sim_period, itemcode, model_demand, df_for_baseline)
-        except Exception as e:
-            print(f"Baseline comparison failed: {e}")
-            _run_baselines(self, df_sim_period, itemcode)
+        baseline_table = _run_baselines(self, df_sim_period, itemcode)
 
         print("\nSimulation complete.")
+        return {
+            "history_pred": self.history_pred.copy(),
+            "baseline": baseline_table.copy(),
+            "first_day": first_day,
+            "last_day": last_day,
+        }
 
 
 # ---------------------------------------------------------------------------

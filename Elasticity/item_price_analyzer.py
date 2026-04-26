@@ -24,7 +24,7 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
-log = logging.getLogger("item_price_analyzer_v2")
+log = logging.getLogger("item_price_analyzer")
 
 
 def analyze_item(
@@ -39,7 +39,7 @@ def analyze_item(
 
     item_code = int(item_code)
     date_ts = pd.Timestamp(date).normalize()
-    log.info("analyze_item_v2: ITEMCODE=%s, date=%s, price=%s", item_code, date_ts.date(), price)
+    log.info("analyze_item: ITEMCODE=%s, date=%s, price=%s", item_code, date_ts.date(), price)
 
     default_params = {
         "LAMBDA_KVI": 10.0,
@@ -49,8 +49,13 @@ def analyze_item(
         "MIN_PRICE_MULT": 0.5,
         "DIGIT_PRICE_DELTAS": [-0.09, -0.05, -0.02, 0.0, 0.02, 0.05, 0.09],
     }
-    hp_path = PROJECT_ROOT / "hyperparameters.json"
-    if hp_path.exists():
+    hp_path = None
+    for candidate in [PROJECT_ROOT / "hyperparameters.json", PROJECT_ROOT / "KVI" / "hyperparameters.json"]:
+        if candidate.exists():
+            hp_path = candidate
+            break
+
+    if hp_path is not None:
         with open(hp_path, encoding="utf-8") as f:
             hp = json.load(f)
             default_params.update(hp.get("agent6", hp))
@@ -83,7 +88,7 @@ def analyze_item(
         result_df["kvi_score"] = result_df["ITEMCODE"].map(score_map)
 
     duration = round(time.time() - t0, 2)
-    log.info("analyze_item_v2 finished in %ss, family size=%s", duration, len(result_df))
+    log.info("analyze_item finished in %ss, family size=%s", duration, len(result_df))
 
     if output_path:
         report = {
@@ -105,7 +110,7 @@ def analyze_item(
     return result_df
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="Item-level day simulation: elasticity -> KVI -> policy optimization")
     parser.add_argument("--item", type=int, required=True, help="ITEMCODE")
     parser.add_argument("--date", type=str, required=True, help="Analysis date YYYY-MM-DD")
@@ -119,7 +124,7 @@ if __name__ == "__main__":
     if args.lambda_kvi is not None:
         extra_params["LAMBDA_KVI"] = args.lambda_kvi
 
-    output_path = args.output or str(OUTPUT_DIR / f"item_analysis_v2_{args.item}_{args.date}.json")
+    output_path = args.output or str(OUTPUT_DIR / f"item_analysis_{args.item}_{args.date}.json")
     df = analyze_item(
         item_code=args.item,
         date=args.date,
@@ -128,6 +133,10 @@ if __name__ == "__main__":
         params=extra_params if extra_params else None,
         output_path=output_path,
     )
-    print("\n" + "═" * 70)
+    print("\n" + "=" * 70)
     print(df.to_string(index=False))
-    print("═" * 70)
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
