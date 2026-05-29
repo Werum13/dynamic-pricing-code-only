@@ -44,6 +44,9 @@ DEFAULT_HYPERPARAMETERS = {
         'SUBSTITUTE_CORR_THRESHOLD': -0.1,
         'CORR_THRESHOLD': 0.3,
         'LIFT_THRESHOLD': 1.5,
+        'USE_CALIBRATED_THRESHOLDS': True,
+        'CALIBRATION_ALPHA': 0.10,
+        'MIN_CALIBRATION_PAIRS': 200,
         'OUTPUT_CORR_FILTER': 0.1,
         'OUTPUT_LIFT_FILTER': 1.2,
     }
@@ -66,6 +69,14 @@ def _load_hyperparameters() -> dict:
 
 HP = _load_hyperparameters()
 
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+    return bool(value)
+
 RANDOM_SEED = int(HP['RANDOM_SEED'])
 PRICE_SIMILARITY_THRESHOLD = float(HP['PRICE_SIMILARITY_THRESHOLD'])
 MAX_ORDERS = int(HP['MAX_ORDERS'])
@@ -74,6 +85,9 @@ MIN_COMPLEMENT_SUPPORT = int(HP['MIN_COMPLEMENT_SUPPORT'])
 SUBSTITUTE_CORR_THRESHOLD = float(HP['SUBSTITUTE_CORR_THRESHOLD'])
 CORR_THRESHOLD = float(HP['CORR_THRESHOLD'])
 LIFT_THRESHOLD = float(HP['LIFT_THRESHOLD'])
+USE_CALIBRATED_THRESHOLDS = _as_bool(HP['USE_CALIBRATED_THRESHOLDS'])
+CALIBRATION_ALPHA = float(HP['CALIBRATION_ALPHA'])
+MIN_CALIBRATION_PAIRS = int(HP['MIN_CALIBRATION_PAIRS'])
 OUTPUT_CORR_FILTER = float(HP['OUTPUT_CORR_FILTER'])
 OUTPUT_LIFT_FILTER = float(HP['OUTPUT_LIFT_FILTER'])
 
@@ -167,8 +181,8 @@ def _pearson_from_standardized_series(series_a: np.ndarray | None, series_b: np.
     return corr
 
 
-def _is_complement_pair(corr: float, lift: float) -> bool:
-    return corr > CORR_THRESHOLD and lift > LIFT_THRESHOLD
+def _is_complement_pair(corr: float, lift: float, corr_threshold: float, lift_threshold: float) -> bool:
+    return corr > corr_threshold and lift > lift_threshold
 
 
 def _classify_substitute_pair(corr: float, price_a: float, price_b: float) -> str:
@@ -180,6 +194,40 @@ def _classify_substitute_pair(corr: float, price_a: float, price_b: float) -> st
         return 'CANNIBALIZE'
 
     return 'INDEPENDENT'
+
+
+def _calibrate_upper_quantile_threshold(
+    values: list[float],
+    alpha: float,
+    fallback_threshold: float,
+    metric_name: str,
+    min_samples: int,
+) -> tuple[float, int, bool]:
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    sample_size = int(arr.size)
+
+    if sample_size < max(1, min_samples):
+        log['warnings'].append(
+            f'Calibration for {metric_name} skipped: only {sample_size} pairs (required >= {min_samples}).'
+        )
+        return fallback_threshold, sample_size, False
+
+    quantile_level = 1.0 - alpha
+    if quantile_level < 0.0 or quantile_level > 1.0:
+        log['warnings'].append(
+            f'Calibration alpha={alpha} is out of range; quantile level clipped into [0, 1].'
+        )
+        quantile_level = min(max(quantile_level, 0.0), 1.0)
+
+    calibrated = float(np.quantile(arr, quantile_level))
+    if not np.isfinite(calibrated):
+        log['warnings'].append(
+            f'Calibration for {metric_name} produced non-finite threshold; fixed fallback is used.'
+        )
+        return fallback_threshold, sample_size, False
+
+    return calibrated, sample_size, True
 
 
 def _sample_orders(con: duckdb.DuckDBPyConnection, total_valid_orders: int) -> int:
@@ -228,13 +276,16 @@ def _pair_category3_label(category3_a: str, category3_b: str) -> str:
     return f'{category3_a} <> {category3_b}'
 
 
-def _save_histograms(corr_values: list[float], lift_values: list[float]) -> list[str]:
+def _save_histograms(
+    corr_values: list[float],
+    lift_values: list[float],
+    corr_threshold: float,
+    lift_threshold: float,
+) -> list[str]:
     corr_path = os.path.join(OUT, 'agent3_corr_hist.png')
     lift_path = os.path.join(OUT, 'agent3_lift_hist.png')
 
-    corr_threshold = CORR_THRESHOLD
     corr_filter = OUTPUT_CORR_FILTER
-    lift_threshold = LIFT_THRESHOLD
     lift_filter = OUTPUT_LIFT_FILTER
 
     # Корреляции
@@ -315,7 +366,9 @@ def main():
     print(
         f"[AGENT 3] Hyperparameters: CORR_THRESHOLD={CORR_THRESHOLD}, "
         f"LIFT_THRESHOLD={LIFT_THRESHOLD}, "
-        f"PRICE_SIMILARITY_THRESHOLD={PRICE_SIMILARITY_THRESHOLD}",
+        f"PRICE_SIMILARITY_THRESHOLD={PRICE_SIMILARITY_THRESHOLD}, "
+        f"USE_CALIBRATED_THRESHOLDS={USE_CALIBRATED_THRESHOLDS}, "
+        f"CALIBRATION_ALPHA={CALIBRATION_ALPHA}",
         flush=True,
     )
 
@@ -341,7 +394,7 @@ def main():
         if eligible.empty:
             log['status'] = 'WARNING'
             log['warnings'].append('No eligible items found (order_count > 50 and non-empty CATEGORY3).')
-            hist_paths = _save_histograms([], [])
+            hist_paths = _save_histograms([], [], CORR_THRESHOLD, LIFT_THRESHOLD)
             pairs_df = pd.DataFrame(columns=PAIR_COLUMNS)
             pairs_path = os.path.join(OUT, 'item_pairs.csv')
             pairs_df.to_csv(pairs_path, index=False)
@@ -421,7 +474,7 @@ def main():
         if total_valid_orders == 0:
             log['status'] = 'WARNING'
             log['warnings'].append('No valid orders left after clean_flags filtering.')
-            hist_paths = _save_histograms([], [])
+            hist_paths = _save_histograms([], [], CORR_THRESHOLD, LIFT_THRESHOLD)
             pairs_df = pd.DataFrame(columns=PAIR_COLUMNS)
             pairs_path = os.path.join(OUT, 'item_pairs.csv')
             pairs_df.to_csv(pairs_path, index=False)
@@ -458,6 +511,7 @@ def main():
         cat3_groups = eligible.groupby('CATEGORY3')['ITEMID'].apply(list).to_dict()
         cat2_groups = eligible.groupby('CATEGORY2')['ITEMID'].apply(list).to_dict()
         pairs_records = []
+        complement_candidates: list[dict[str, object]] = []
         sub_map = defaultdict(lambda: {'substitutes': set(), 'complements': set(), 'cannibals': set()})
         corr_values: list[float] = []
         lift_values: list[float] = []
@@ -531,6 +585,7 @@ def main():
                 price_a = price_map.get(item_a, np.nan)
                 price_b = price_map.get(item_b, np.nan)
                 corr = _pearson_from_standardized_series(series_map.get(item_a), series_map.get(item_b))
+                corr_values.append(float(corr))
                 if corr >= SUBSTITUTE_CORR_THRESHOLD:
                     continue
 
@@ -539,7 +594,6 @@ def main():
                     continue
 
                 lift = co_purchases * sample_orders / (count_a * count_b)
-                corr_values.append(float(corr))
                 lift_values.append(float(lift))
 
                 pairs_records.append(
@@ -630,47 +684,114 @@ def main():
                     continue
 
                 lift = co_purchases * sample_orders / (count_a * count_b)
-                if lift <= LIFT_THRESHOLD:
-                    continue
-
                 corr = _pearson_from_standardized_series(series_map.get(item_a), series_map.get(item_b))
-                if corr <= CORR_THRESHOLD:
-                    continue
-
                 corr_values.append(float(corr))
                 lift_values.append(float(lift))
 
                 category3_a = str(meta.get(item_a, {}).get('CATEGORY3', ''))
                 category3_b = str(meta.get(item_b, {}).get('CATEGORY3', ''))
-
-                # CATEGORY2 loop keeps only cross-CATEGORY3 links to avoid duplicating WITHIN_CATEGORY3 pairs.
-                if category3_a == category3_b:
-                    continue
-
                 category1_a = str(meta.get(item_a, {}).get('CATEGORY1', category1_map.get(item_a, '')))
                 category1_b = str(meta.get(item_b, {}).get('CATEGORY1', category1_map.get(item_b, '')))
-                pair_type = 'COMPLEMENT' if _is_complement_pair(corr, lift) else 'INDEPENDENT'
-                category1 = category1_a if category1_a == category1_b else f'{category1_a} <> {category1_b}'
                 pair_scope = f'WITHIN_CATEGORY2_CROSS_CATEGORY3_n{len(item_levels)}'
 
-                pairs_records.append(
+                complement_candidates.append(
                     {
                         'item_a': item_a,
                         'item_b': item_b,
-                        'category1': category1,
+                        'category1_a': category1_a,
+                        'category1_b': category1_b,
                         'category2': cat2,
-                        'category3': _pair_category3_label(category3_a, category3_b),
+                        'category3_a': category3_a,
+                        'category3_b': category3_b,
                         'pair_scope': pair_scope,
                         'co_purchases': co_purchases,
-                        'lift': round(float(lift), 4),
-                        'pearson_corr': round(float(corr), 4),
-                        'pair_type': pair_type,
+                        'lift': float(lift),
+                        'pearson_corr': float(corr),
                     }
                 )
 
-                if pair_type == 'COMPLEMENT':
-                    sub_map[item_a]['complements'].add(item_b)
-                    sub_map[item_b]['complements'].add(item_a)
+        corr_threshold = CORR_THRESHOLD
+        lift_threshold = LIFT_THRESHOLD
+        corr_sample_size = 0
+        lift_sample_size = 0
+        corr_is_calibrated = False
+        lift_is_calibrated = False
+
+        if USE_CALIBRATED_THRESHOLDS:
+            corr_values_for_calibration = [float(rec['pearson_corr']) for rec in complement_candidates]
+            lift_values_for_calibration = [float(rec['lift']) for rec in complement_candidates]
+            corr_threshold, corr_sample_size, corr_is_calibrated = _calibrate_upper_quantile_threshold(
+                values=corr_values_for_calibration,
+                alpha=CALIBRATION_ALPHA,
+                fallback_threshold=CORR_THRESHOLD,
+                metric_name='pearson_corr',
+                min_samples=MIN_CALIBRATION_PAIRS,
+            )
+            lift_threshold, lift_sample_size, lift_is_calibrated = _calibrate_upper_quantile_threshold(
+                values=lift_values_for_calibration,
+                alpha=CALIBRATION_ALPHA,
+                fallback_threshold=LIFT_THRESHOLD,
+                metric_name='lift',
+                min_samples=MIN_CALIBRATION_PAIRS,
+            )
+
+        log['calibration'] = {
+            'enabled': USE_CALIBRATED_THRESHOLDS,
+            'alpha': CALIBRATION_ALPHA,
+            'quantile_level': max(0.0, min(1.0, 1.0 - CALIBRATION_ALPHA)),
+            'min_calibration_pairs': MIN_CALIBRATION_PAIRS,
+            'candidate_pairs': len(complement_candidates),
+            'corr_threshold_fixed': CORR_THRESHOLD,
+            'lift_threshold_fixed': LIFT_THRESHOLD,
+            'corr_threshold_final': corr_threshold,
+            'lift_threshold_final': lift_threshold,
+            'corr_sample_size': corr_sample_size,
+            'lift_sample_size': lift_sample_size,
+            'corr_calibrated': corr_is_calibrated,
+            'lift_calibrated': lift_is_calibrated,
+        }
+        print(
+            f"[AGENT 3] Complement thresholds: corr>{corr_threshold:.4f}, lift>{lift_threshold:.4f} "
+            f"(candidate_pairs={len(complement_candidates):,})",
+            flush=True,
+        )
+
+        for rec in complement_candidates:
+            category3_a = str(rec['category3_a'])
+            category3_b = str(rec['category3_b'])
+
+            # CATEGORY2 loop keeps only cross-CATEGORY3 links to avoid duplicating WITHIN_CATEGORY3 pairs.
+            if category3_a == category3_b:
+                continue
+
+            corr = float(rec['pearson_corr'])
+            lift = float(rec['lift'])
+            if not _is_complement_pair(corr, lift, corr_threshold, lift_threshold):
+                continue
+
+            item_a = str(rec['item_a'])
+            item_b = str(rec['item_b'])
+            category1_a = str(rec['category1_a'])
+            category1_b = str(rec['category1_b'])
+            category1 = category1_a if category1_a == category1_b else f'{category1_a} <> {category1_b}'
+
+            pairs_records.append(
+                {
+                    'item_a': item_a,
+                    'item_b': item_b,
+                    'category1': category1,
+                    'category2': str(rec['category2']),
+                    'category3': _pair_category3_label(category3_a, category3_b),
+                    'pair_scope': str(rec['pair_scope']),
+                    'co_purchases': int(rec['co_purchases']),
+                    'lift': round(lift, 4),
+                    'pearson_corr': round(corr, 4),
+                    'pair_type': 'COMPLEMENT',
+                }
+            )
+
+            sub_map[item_a]['complements'].add(item_b)
+            sub_map[item_b]['complements'].add(item_a)
 
         pairs_df = pd.DataFrame(pairs_records, columns=PAIR_COLUMNS)
         if not pairs_df.empty:
@@ -679,7 +800,7 @@ def main():
             log['status'] = 'WARNING'
             log['warnings'].append('No item pairs passed the output filters for substitutes or complements.')
 
-        hist_paths = _save_histograms(corr_values, lift_values)
+        hist_paths = _save_histograms(corr_values, lift_values, corr_threshold, lift_threshold)
 
         pairs_path = os.path.join(OUT, 'item_pairs.csv')
         pairs_df.to_csv(pairs_path, index=False)

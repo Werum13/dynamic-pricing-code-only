@@ -16,7 +16,7 @@ OUTPUT:
              q1_orders, q2_orders, q3_orders, q4_orders
 """
 
-import duckdb, json, os, time
+import duckdb, json, os, shutil, tempfile, time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_ROOT = os.path.dirname(BASE)
@@ -27,10 +27,58 @@ os.makedirs(OUT, exist_ok=True)
 log = {"agent": "FEATURE_ENGINEER", "status": "SUCCESS",
        "rows_processed": 0, "warnings": [], "output_files": []}
 
+
+def _pick_duckdb_temp_dir() -> tuple[str, int]:
+    # Prefer a writable temp directory with the most free space.
+    candidates = [
+        os.environ.get('DUCKDB_TEMP_DIRECTORY'),
+        os.environ.get('TMPDIR'),
+        os.path.join(OUT, '.duckdb_tmp'),
+        tempfile.gettempdir(),
+    ]
+
+    best_path = None
+    best_free = -1
+    seen = set()
+
+    for raw_path in candidates:
+        if not raw_path:
+            continue
+        path = os.path.abspath(os.path.expanduser(raw_path))
+        if path in seen:
+            continue
+        seen.add(path)
+
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, '.duckdb_tmp_probe')
+            with open(probe, 'w', encoding='utf-8') as f:
+                f.write('ok')
+            os.remove(probe)
+
+            free_bytes = shutil.disk_usage(path).free
+            if free_bytes > best_free:
+                best_path = path
+                best_free = free_bytes
+        except OSError:
+            continue
+
+    if best_path is None:
+        raise OSError('Could not find writable temp directory for DuckDB.')
+
+    return best_path, best_free
+
 def main():
     print("[AGENT 2] FEATURE_ENGINEER starting...", flush=True)
     t0  = time.time()
     con = duckdb.connect()
+    temp_dir, free_bytes = _pick_duckdb_temp_dir()
+    temp_dir_sql = temp_dir.replace("'", "''")
+    con.execute(f"PRAGMA temp_directory='{temp_dir_sql}'")
+    print(
+        f"[AGENT 2] DuckDB temp_directory={temp_dir} (free={free_bytes / (1024 ** 3):.1f} GB)",
+        flush=True,
+    )
 
     flags_path = os.path.join(OUT, 'clean_flags.csv')
     if not os.path.exists(flags_path):
